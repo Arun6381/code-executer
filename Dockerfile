@@ -1,9 +1,29 @@
-FROM node:20-slim
+FROM ubuntu:22.04
 
-# Install Docker CLI (to spawn sibling containers)
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Kolkata
+
+# Install all language runtimes in one layer
 RUN apt-get update && apt-get install -y \
-    docker.io \
+    # C / C++
+    gcc g++ \
+    # Python
+    python3 python3-pip \
+    # Java
+    default-jdk \
+    # Node.js
+    nodejs npm \
+    # Utilities
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20 (replace default)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create temp dir
+RUN mkdir -p /tmp/code-runner && chmod 777 /tmp/code-runner
 
 WORKDIR /app
 
@@ -11,9 +31,6 @@ COPY package*.json ./
 RUN npm install --production
 
 COPY server.js ./
-
-# Temp dir for sandboxes
-RUN mkdir -p /tmp/code-runner
 
 EXPOSE 3001
 

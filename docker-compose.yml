@@ -9,26 +9,7 @@ services:
     environment:
       - PORT=3001
       - ALLOWED_ORIGIN=https://edxzone.in
-    volumes:
-      # Mount Docker socket so we can spawn sibling containers
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Shared temp dir between host and this container
-      - /tmp/code-runner:/tmp/code-runner
     restart: unless-stopped
     mem_limit: 512m
     cpus: '1.0'
-
-  # Pull language images on startup
-  pull-images:
-    image: docker:24-cli
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    command: >
-      sh -c "
-        docker pull gcc:13 &&
-        docker pull python:3.12-slim &&
-        docker pull openjdk:21-slim &&
-        docker pull node:20-slim &&
-        echo '✅ All language images pulled'
-      "
-    restart: "no"
+    # No Docker socket needed anymore!
