@@ -1,28 +1,17 @@
-FROM ubuntu:22.04
+FROM node:20-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Kolkata
 
-# Install all language runtimes in one layer
+# Install C, C++, Python, Java on top of the node:20 base image
+# This avoids Node.js version conflicts entirely
 RUN apt-get update && apt-get install -y \
-    # C / C++
-    gcc g++ \
-    # Python
-    python3 python3-pip \
-    # Java
+    gcc \
+    g++ \
+    python3 \
     default-jdk \
-    # Node.js
-    nodejs npm \
-    # Utilities
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 20 (replace default)
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create temp dir
+# Create temp dir for code execution
 RUN mkdir -p /tmp/code-runner && chmod 777 /tmp/code-runner
 
 WORKDIR /app
