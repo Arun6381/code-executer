@@ -1,20 +1,15 @@
-const express    = require('express')
-const cors       = require('cors')
+const express      = require('express')
+const cors         = require('cors')
 const { v4: uuid } = require('uuid')
-const { spawn }  = require('child_process')
-const fs         = require('fs')
-const path       = require('path')
-const rateLimit  = require('express-rate-limit')
+const { spawn }    = require('child_process')
+const fs           = require('fs')
+const path         = require('path')
+const rateLimit    = require('express-rate-limit')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
 
-// ── Middleware ─────────────────────────────────────────────────────
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }))
 app.use(express.json({ limit: '50kb' }))
 
 const limiter = rateLimit({ windowMs: 60000, max: 60, message: { error: 'Too many requests.' } })
@@ -23,49 +18,51 @@ app.use('/execute', limiter)
 // ── Language config ────────────────────────────────────────────────
 const LANGUAGES = {
   c: {
-    fileName:  'main.c',
-    compile:   (dir) => ['gcc', ['-O2', '-o', path.join(dir,'prog'), path.join(dir,'main.c'), '-lm']],
-    run:       (dir) => [path.join(dir,'prog'), []],
-    timeout:   10,
+    fileName: 'main.c',
+    compile:  (dir) => ['gcc', ['-O2', '-o', path.join(dir,'prog'), path.join(dir,'main.c'), '-lm']],
+    run:      (dir) => [path.join(dir,'prog'), []],
+    timeout:  10,
   },
   cpp: {
-    fileName:  'main.cpp',
-    compile:   (dir) => ['g++', ['-O2', '-std=c++17', '-o', path.join(dir,'prog'), path.join(dir,'main.cpp'), '-lm']],
-    run:       (dir) => [path.join(dir,'prog'), []],
-    timeout:   10,
+    fileName: 'main.cpp',
+    compile:  (dir) => ['g++', ['-O2', '-std=c++17', '-o', path.join(dir,'prog'), path.join(dir,'main.cpp'), '-lm']],
+    run:      (dir) => [path.join(dir,'prog'), []],
+    timeout:  10,
   },
   python: {
-    fileName:  'main.py',
-    compile:   null,
-    run:       (dir) => ['python3', [path.join(dir,'main.py')]],
-    timeout:   10,
+    fileName: 'main.py',
+    compile:  null,
+    run:      (dir) => ['python3', [path.join(dir,'main.py')]],
+    timeout:  10,
   },
   java: {
-    fileName:  'Main.java',
-    compile:   (dir) => ['javac', [path.join(dir,'Main.java')]],
-    run:       (dir) => ['java', ['-cp', dir, 'Main']],
-    timeout:   15,
+    fileName: 'Main.java',
+    compile:  (dir) => ['javac', [path.join(dir,'Main.java')]],
+    run:      (dir) => ['java', ['-cp', dir, 'Main']],
+    timeout:  15,
   },
   javascript: {
-    fileName:  'main.js',
-    compile:   null,
-    run:       (dir) => ['node', [path.join(dir,'main.js')]],
-    timeout:   10,
+    fileName: 'main.js',
+    compile:  null,
+    // ── KEY FIX: pass --input-type=module flag removed, use plain node
+    // stdin is piped directly — no /dev/stdin needed
+    run:      (dir) => ['node', [path.join(dir,'main.js')]],
+    timeout:  10,
   },
 }
 
-// ── Temp dir ───────────────────────────────────────────────────────
 const TMP_DIR = '/tmp/code-runner'
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true })
 
-// ── Run a process ──────────────────────────────────────────────────
+// ── Run process with stdin piped directly ─────────────────────────
 function runProcess(cmd, args, stdin, timeoutSecs) {
   return new Promise((resolve) => {
     let stdout = '', stderr = '', timedOut = false
 
     const proc = spawn(cmd, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: {
-        PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+        PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
         HOME: '/tmp',
         LANG: 'en_US.UTF-8',
       },
@@ -79,8 +76,11 @@ function runProcess(cmd, args, stdin, timeoutSecs) {
     proc.stdout.on('data', d => { stdout += d.toString() })
     proc.stderr.on('data', d => { stderr += d.toString() })
 
-    if (stdin) { proc.stdin.write(stdin); proc.stdin.end() }
-    else proc.stdin.end()
+    // ── KEY: write stdin directly to the process pipe ──
+    if (stdin && stdin.length > 0) {
+      proc.stdin.write(stdin)
+    }
+    proc.stdin.end()
 
     proc.on('close', (code) => {
       clearTimeout(timer)
@@ -94,7 +94,7 @@ function runProcess(cmd, args, stdin, timeoutSecs) {
   })
 }
 
-// ── Shared compile helper ──────────────────────────────────────────
+// ── Compile helper ─────────────────────────────────────────────────
 async function compileCode(lang, dir) {
   if (!lang.compile) return null
   const [cmd, args] = lang.compile(dir)
@@ -102,23 +102,20 @@ async function compileCode(lang, dir) {
   if (result.exitCode !== 0) {
     return result.stderr || result.stdout || 'Compilation failed'
   }
-  return null // null = success
+  return null
 }
 
-// ── Cleanup ────────────────────────────────────────────────────────
 function cleanup(dir) {
   try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
 }
 
-// ══════════════════════════════════════════════════════════════════
-// POST /execute  — single run
-// ══════════════════════════════════════════════════════════════════
+// ── POST /execute ─────────────────────────────────────────────────
 app.post('/execute', async (req, res) => {
   const { language, code, stdin = '' } = req.body
 
-  if (!language || !code)      return res.status(400).json({ error: 'language and code are required' })
-  if (!LANGUAGES[language])    return res.status(400).json({ error: `Unsupported language: ${language}` })
-  if (code.length > 50000)     return res.status(400).json({ error: 'Code too long (max 50KB)' })
+  if (!language || !code)   return res.status(400).json({ error: 'language and code are required' })
+  if (!LANGUAGES[language]) return res.status(400).json({ error: `Unsupported language: ${language}` })
+  if (code.length > 50000)  return res.status(400).json({ error: 'Code too long (max 50KB)' })
 
   const lang = LANGUAGES[language]
   const dir  = path.join(TMP_DIR, uuid())
@@ -127,18 +124,14 @@ app.post('/execute', async (req, res) => {
   try {
     fs.writeFileSync(path.join(dir, lang.fileName), code)
 
-    // Compile
     const compileErr = await compileCode(lang, dir)
     if (compileErr !== null) {
       return res.json({
-        stdout: null, stderr: null,
-        compile_output: compileErr,
-        status: 'Compilation Error', status_id: 6,
-        time: null, memory: null,
+        stdout: null, stderr: null, compile_output: compileErr,
+        status: 'Compilation Error', status_id: 6, time: null, memory: null,
       })
     }
 
-    // Run
     const [cmd, args] = lang.run(dir)
     const start  = Date.now()
     const result = await runProcess(cmd, args, stdin, lang.timeout)
@@ -146,8 +139,7 @@ app.post('/execute', async (req, res) => {
 
     if (result.timedOut) {
       return res.json({
-        stdout: null, stderr: 'Time Limit Exceeded',
-        compile_output: null,
+        stdout: null, stderr: 'Time Limit Exceeded', compile_output: null,
         status: 'Time Limit Exceeded', status_id: 5,
         time: `${lang.timeout}.000`, memory: null,
       })
@@ -167,9 +159,7 @@ app.post('/execute', async (req, res) => {
   } finally { cleanup(dir) }
 })
 
-// ══════════════════════════════════════════════════════════════════
-// POST /execute/batch  — run against multiple test cases
-// ══════════════════════════════════════════════════════════════════
+// ── POST /execute/batch ───────────────────────────────────────────
 app.post('/execute/batch', async (req, res) => {
   const { language, code, test_cases = [] } = req.body
 
@@ -184,21 +174,16 @@ app.post('/execute/batch', async (req, res) => {
   try {
     fs.writeFileSync(path.join(dir, lang.fileName), code)
 
-    // Compile once
     const compileErr = await compileCode(lang, dir)
     if (compileErr !== null) {
       return res.json({
-        compile_output: compileErr,
-        status: 'Compilation Error',
-        results: [],
-        passed_count: 0,
-        total_count: test_cases.length,
+        compile_output: compileErr, status: 'Compilation Error',
+        results: [], passed_count: 0, total_count: test_cases.length,
       })
     }
 
-    // Run each test case
-    const results = []
     const [cmd, args] = lang.run(dir)
+    const results = []
 
     for (const tc of test_cases) {
       const start  = Date.now()
@@ -219,7 +204,7 @@ app.post('/execute/batch', async (req, res) => {
         status:          result.timedOut ? 'Time Limit Exceeded'
                        : result.exitCode === 0 ? (passed ? 'Accepted' : 'Wrong Answer')
                        : 'Runtime Error',
-        is_hidden:       tc.is_hidden || false,
+        is_hidden: tc.is_hidden || false,
       })
     }
 
@@ -240,28 +225,30 @@ app.get('/languages', (req, res) => {
   res.json(Object.keys(LANGUAGES).map(k => ({
     id: k,
     name: {
-      c: 'C (GCC)', cpp: 'C++ 17', python: 'Python 3',
-      java: 'Java', javascript: 'JavaScript (Node.js)',
+      c:'C (GCC)', cpp:'C++ 17', python:'Python 3',
+      java:'Java', javascript:'JavaScript (Node.js)',
     }[k],
   })))
 })
 
 // ── GET /health ────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
-  // Quick test: run python
+  // Quick JS stdin test
   const dir = path.join(TMP_DIR, uuid())
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir,'main.py'), 'print("ok")')
-  const result = await runProcess('python3', [path.join(dir,'main.py')], '', 5)
+  fs.writeFileSync(path.join(dir,'main.js'), 'const chunks=[]; process.stdin.on("data",d=>chunks.push(d)); process.stdin.on("end",()=>process.stdout.write(chunks.join("").trim()));')
+  const r = await runProcess('node', [path.join(dir,'main.js')], 'ok', 5)
   cleanup(dir)
   res.json({
-    status:    result.stdout === 'ok' ? 'ok' : 'error',
+    status:    r.stdout === 'ok' ? 'ok' : 'error',
     languages: Object.keys(LANGUAGES),
-    runtime:   'native (no Docker needed)',
+    runtime:   'native (stdin via pipe)',
+    node_stdin_test: r.stdout === 'ok' ? 'passed' : 'failed',
   })
 })
 
 app.listen(PORT, () => {
-  console.log(`✅ EdxZone Code Runner on port ${PORT} — native execution mode`)
+  console.log(`✅ EdxZone Code Runner on port ${PORT}`)
+  console.log(`   Stdin mode: pipe (no /dev/stdin)`)
   console.log(`   Languages: ${Object.keys(LANGUAGES).join(', ')}`)
 })
